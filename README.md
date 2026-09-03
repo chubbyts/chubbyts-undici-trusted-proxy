@@ -34,7 +34,7 @@ headers (`x-forwarded-for`, `x-forwarded-proto`, `x-forwarded-host`) of trusted 
 Through [NPM](https://www.npmjs.com) as [@chubbyts/chubbyts-undici-trusted-proxy][1].
 
 ```ts
-npm i @chubbyts/chubbyts-undici-trusted-proxy@^1.0.0
+npm i @chubbyts/chubbyts-undici-trusted-proxy@^1.1.0
 ```
 
 ## Usage
@@ -87,14 +87,20 @@ The middleware only sees the headers, not the connection: it cannot verify that 
 proxy. The server must not be reachable except through the proxies, and the proxies must set (or strip) all the
 forwarded headers, as any header they do not touch is supplied by the client.
 
-If the server (or a middleware in front) sets the address of the connection as `remoteAddress` attribute, the
-middleware uses it: a connection from outside the trusted ranges counts as the client itself, and the headers get
-ignored.
+If the server (or a middleware in front) sets the address of the connection as `remoteAddress` attribute (a string,
+`undefined` counts as not set), the middleware uses it: a connection from outside the trusted ranges counts as the
+client itself, and the headers get ignored. A `remoteAddress` which is not a valid ip (junk, a non string) resolves
+nothing, the middleware never falls back to the headers. Mind that [chubbyts-undici-server][2] itself does not set the
+attribute, without it the middleware runs in the headers only mode described above.
 
-The `clientIp` is always a valid ip, the `scheme` and `host` get taken from the headers as sent by the proxies (the
-scheme only lowercased): before using them for url generation or redirects, check the `scheme` against `http` /
-`https` and the `host` against the hosts the application serves (an allowlist), so that a proxy passing the client's
-`x-forwarded-proto` / `x-forwarded-host` through cannot poison generated urls:
+The `clientIp` is always a valid ip in its canonical form (lowercased, compressed, without zone id, e.g.
+`::ffff:203.0.113.1` for an ipv4 mapped ipv6 address), so that it can be compared as a string. Ipv4 mapped ipv6
+addresses (`::ffff:10.0.0.1`) match ipv4 subnets (`10.0.0.0/8`) of the trusted proxies.
+
+The `scheme` and `host` get taken from the headers as sent by the proxies (the scheme only lowercased): before using
+them for url generation or redirects, check the `scheme` against `http` / `https` and the `host` against the hosts the
+application serves (an allowlist), so that a proxy passing the client's `x-forwarded-proto` / `x-forwarded-host`
+through cannot poison generated urls:
 
 ```ts
 const { scheme, host } = serverRequest.attributes;

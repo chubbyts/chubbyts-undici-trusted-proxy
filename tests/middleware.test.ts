@@ -2,7 +2,7 @@ import { describe, expect, test } from 'vitest';
 import { useFunctionMock } from '@chubbyts/chubbyts-function-mock/dist/function-mock';
 import type { Handler } from '@chubbyts/chubbyts-undici-server/dist/server';
 import { Response, ServerRequest } from '@chubbyts/chubbyts-undici-server/dist/server';
-import type { ForwardedResolver, TrustedProxyAttributes } from '../src/middleware';
+import type { ForwardedHeaders, ForwardedResolver, TrustedProxyAttributes } from '../src/middleware';
 import { createForwardedResolver, createTrustedProxyMiddleware } from '../src/middleware';
 
 const none = { clientIp: undefined, scheme: undefined, host: undefined };
@@ -51,6 +51,20 @@ describe('middleware', () => {
       expect(() => createForwardedResolver(['10.0.0.0/8'], { for: 'x-real-ip', host: '' })).toThrow(
         'headers.host must be a valid header name,  given',
       );
+      expect(() => createForwardedResolver(['10.0.0.0/8'], {} as ForwardedHeaders)).toThrow(
+        new TypeError('headers.for must be a string, undefined given'),
+      );
+      expect(() =>
+        createForwardedResolver(['10.0.0.0/8'], { for: 'x-real-ip', proto: 1 as unknown as string }),
+      ).toThrow(new TypeError('headers.proto must be a string, number given'));
+    });
+
+    test('with optional headers explicitly undefined', () => {
+      expect(
+        createForwardedResolver(['10.0.0.0/8'], { for: 'x-real-ip', proto: undefined, host: undefined })(
+          createRequest({ 'x-real-ip': '203.0.113.1', 'x-forwarded-proto': 'https' }),
+        ),
+      ).toStrictEqual(ip('203.0.113.1'));
     });
 
     test('with untrimmed trusted proxies', () => {
@@ -107,6 +121,18 @@ describe('middleware', () => {
       expect(resolve(createRequest({ 'x-forwarded-for': '203.0.113.1, ::ffff:11.0.0.1' }))).toStrictEqual(
         ip('::ffff:11.0.0.1'),
       );
+    });
+
+    test('with non canonical ips, the canonical form', () => {
+      const resolve = createForwardedResolver(['10.0.0.0/8', 'fd00::/8']);
+
+      const clientIpOf = (forwardedFor: string) => resolve(createRequest({ 'x-forwarded-for': forwardedFor }));
+
+      expect(clientIpOf('::FFFF:11.0.0.1')).toStrictEqual(ip('::ffff:11.0.0.1'));
+      expect(clientIpOf('2001:DB8:0000:0:0::0001')).toStrictEqual(ip('2001:db8::1'));
+      expect(clientIpOf('fe80::1%eth0')).toStrictEqual(ip('fe80::1'));
+      expect(clientIpOf('fe80::1%eth0, FD00::1%eth0')).toStrictEqual(ip('fe80::1'));
+      expect(clientIpOf('fe80::1%eth0, 10.0.0.1')).toStrictEqual(ip('fe80::1'));
     });
 
     test('with non ip entries, never trusted and never a client ip', () => {
@@ -186,12 +212,23 @@ describe('middleware', () => {
       expect(
         resolve(createRequest({ 'x-forwarded-for': '203.0.113.1' }, { remoteAddress: 'not-an-ip' })),
       ).toStrictEqual(none);
+      expect(
+        resolve(createRequest({ 'x-forwarded-for': '203.0.113.1' }, { remoteAddress: '::FFFF:198.51.100.1' })),
+      ).toStrictEqual(ip('::ffff:198.51.100.1'));
     });
 
-    test('with non string remoteAddress, the headers get used', () => {
+    test('with non string remoteAddress, nothing gets resolved', () => {
       const resolve = createForwardedResolver(['10.0.0.0/8']);
 
-      expect(resolve(createRequest({ 'x-forwarded-for': '203.0.113.1' }, { remoteAddress: 1 }))).toStrictEqual(
+      for (const remoteAddress of [1, true, null, ['10.0.0.1'], { address: '10.0.0.1' }]) {
+        expect(resolve(createRequest({ 'x-forwarded-for': '203.0.113.1' }, { remoteAddress }))).toStrictEqual(none);
+      }
+    });
+
+    test('with undefined remoteAddress, the headers get used', () => {
+      const resolve = createForwardedResolver(['10.0.0.0/8']);
+
+      expect(resolve(createRequest({ 'x-forwarded-for': '203.0.113.1' }, { remoteAddress: undefined }))).toStrictEqual(
         ip('203.0.113.1'),
       );
     });

@@ -1,7 +1,7 @@
 {
   "name": "@chubbyts/chubbyts-undici-trusted-proxy",
   "type": "module",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "A trusted proxy middleware for chubbyts-undici-server: resolves the client ip, scheme and host from forwarded headers.",
   "keywords": [
     "chubbyts",

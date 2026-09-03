@@ -1,4 +1,4 @@
-import { BlockList, isIP, isIPv4, isIPv6 } from 'node:net';
+import { BlockList, SocketAddress, isIP, isIPv4, isIPv6 } from 'node:net';
 import type { Handler, Middleware, Response } from '@chubbyts/chubbyts-undici-server/dist/server';
 import { ServerRequest } from '@chubbyts/chubbyts-undici-server/dist/server';
 
@@ -62,14 +62,30 @@ const parseSubnet = (subnet: string): { address: string; prefix: number; family:
   return { address, prefix: parsedPrefix, family };
 };
 
-// fail fast at creation instead of per request within Headers.get
+// fail fast at creation instead of per request within Headers.get, which stringifies anything (`undefined` is a valid
+// header name), so the type needs its own check
+const validateHeaderName = (key: keyof ForwardedHeaders, name: unknown): void => {
+  if (typeof name !== 'string') {
+    throw new TypeError(`headers.${key} must be a string, ${typeof name} given`);
+  }
+
+  try {
+    new Headers().get(name);
+  } catch {
+    throw new Error(`headers.${key} must be a valid header name, ${name} given`);
+  }
+};
+
+// `for` is required (without it the resolver would silently resolve nothing), the others are optional
 const validateHeaderNames = (headers: ForwardedHeaders): void => {
-  for (const [key, name] of Object.entries(headers)) {
-    try {
-      new Headers().get(name);
-    } catch {
-      throw new Error(`headers.${key} must be a valid header name, ${name} given`);
-    }
+  validateHeaderName('for', headers.for);
+
+  if (headers.proto !== undefined) {
+    validateHeaderName('proto', headers.proto);
+  }
+
+  if (headers.host !== undefined) {
+    validateHeaderName('host', headers.host);
   }
 };
 
@@ -82,21 +98,27 @@ const entriesOf = (request: ServerRequest, name: string | undefined): Array<stri
 
 const nonBlank = (entry: string | undefined): string | undefined => entry || undefined;
 
-// only a valid ip is a client ip, everything else (blank, "unknown", ip:port, junk) resolves nothing
-const asIp = (entry: string): string | undefined => (isIP(entry) ? entry : undefined);
+// only a valid ip is a client ip, everything else (blank, "unknown", ip:port, junk, a non string) resolves nothing,
+// in its canonical form (lowercased, compressed, without zone id) so that downstream comparisons work
+const asIp = (entry: unknown): string | undefined =>
+  typeof entry === 'string' && isIP(entry)
+    ? new SocketAddress({ address: entry, family: isIPv6(entry) ? 'ipv6' : 'ipv4' }).address
+    : undefined;
 
 /**
  * Creates a resolver for the client ip, scheme and host of a request out of the forwarded `headers`:
  *  - the entries of the `for` header get walked from the right (the entries as appended by the proxies, the nearest
  *    one last), skipping the ones within the `trustedProxies` ips / cidrs (e.g. `['10.0.0.0/8', '::1']`, ipv4 mapped
- *    ipv6 addresses match ipv4 subnets), the first untrusted one is the client ip, if it is a valid ip. Only trusted
- *    entries, or an untrusted one which is not a valid ip (blank, `unknown`, `ip:port`, junk), resolve nothing.
+ *    ipv6 addresses match ipv4 subnets), the first untrusted one is the client ip, if it is a valid ip (returned in
+ *    its canonical form: lowercased, compressed, without zone id). Only trusted entries, or an untrusted one which is
+ *    not a valid ip (blank, `unknown`, `ip:port`, junk), resolve nothing.
  *  - the scheme and host get only resolved when a client ip was resolved: the entry at the same position, if the
  *    header has as many entries as the `for` header (proxies appending to all of them), the last (the one the nearest
  *    proxy set) otherwise. The scheme gets lowercased.
  *  - if the request has a `remoteAddress` attribute (the address of the connection, as set by the server), a
  *    connection from outside the trusted ranges is the client itself: its address is the client ip and the headers get
- *    ignored.
+ *    ignored. An attribute which is not a valid ip (junk, a non string) resolves nothing, as the headers cannot be
+ *    trusted without knowing the connection either.
  */
 export const createForwardedResolver = (
   trustedProxies: Array<string>,
@@ -126,7 +148,9 @@ export const createForwardedResolver = (
   return (request: ServerRequest) => {
     const { remoteAddress } = request.attributes;
 
-    if (typeof remoteAddress === 'string' && !isTrustedProxy(remoteAddress)) {
+    // set (undefined counts as not set, e.g. a unix socket) but not a trusted proxy: the client itself, or a broken
+    // (non ip, non string) attribute which resolves nothing, never a fallback to the headers
+    if (remoteAddress !== undefined && (typeof remoteAddress !== 'string' || !isTrustedProxy(remoteAddress))) {
       return { clientIp: asIp(remoteAddress), scheme: undefined, host: undefined };
     }
 
