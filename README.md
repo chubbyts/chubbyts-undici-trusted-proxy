@@ -34,7 +34,7 @@ headers (`x-forwarded-for`, `x-forwarded-proto`, `x-forwarded-host`) of trusted 
 Through [NPM](https://www.npmjs.com) as [@chubbyts/chubbyts-undici-trusted-proxy][1].
 
 ```ts
-npm i @chubbyts/chubbyts-undici-trusted-proxy@^1.1.0
+npm i @chubbyts/chubbyts-undici-trusted-proxy@^1.2.0
 ```
 
 ## Usage
@@ -46,7 +46,11 @@ to trust and passes the request on with the `clientIp`, `scheme` and `host` attr
 
 ```ts
 import type { TrustedProxyAttributes } from '@chubbyts/chubbyts-undici-trusted-proxy/dist/middleware';
-import { createForwardedResolver, createTrustedProxyMiddleware } from '@chubbyts/chubbyts-undici-trusted-proxy/dist/middleware';
+import {
+  DEFAULT_FORWARDED_HEADERS,
+  createForwardedResolver,
+  createTrustedProxyMiddleware,
+} from '@chubbyts/chubbyts-undici-trusted-proxy/dist/middleware';
 import type { Handler } from '@chubbyts/chubbyts-undici-server/dist/server';
 import { Response, ServerRequest } from '@chubbyts/chubbyts-undici-server/dist/server';
 
@@ -62,8 +66,10 @@ const handler: Handler<TrustedProxyAttributes> = async (serverRequest) => {
 };
 
 (async () => {
-  const serverRequest = new ServerRequest<TrustedProxyAttributes>('https://example.com', {
+  const serverRequest = new ServerRequest<TrustedProxyAttributes, { remoteAddress: string }>('https://example.com', {
     headers: { 'x-forwarded-for': '203.0.113.1, 10.0.0.1', 'x-forwarded-proto': 'https', 'x-forwarded-host': 'example.com' },
+    // the address of the connection, as set by the server (see security)
+    attributes: { remoteAddress: '10.0.0.2' },
   });
 
   const response = await trustedProxyMiddleware(serverRequest, handler);
@@ -73,50 +79,63 @@ const handler: Handler<TrustedProxyAttributes> = async (serverRequest) => {
 Register the middleware **before** any middleware that reads the attributes. Requests without a resolvable client ip
 (no `x-forwarded-for`, only trusted entries, or a first untrusted entry which is not a valid ip like `unknown` or
 `ip:port`) get `undefined` attributes. The middleware always sets all three attributes (the unresolved ones as
-`undefined`), so that nothing set before it survives. A subnet matching every ip (`0.0.0.0/0`, `::/0`) gets rejected, as it would
-trust every entry and never resolve anything, an empty list as well, as it would trust no entry and resolve the nearest
-proxy as client ip, the entries get trimmed.
+`undefined`), so that nothing set before it survives. A subnet matching every ip (`0.0.0.0/0`, `::/0`) gets rejected,
+as it would trust every entry and never resolve anything, an empty list as well, as it would trust no entry and resolve
+the nearest proxy as client ip, the entries get trimmed. Ipv4 mapped ipv6 addresses (`::ffff:10.0.0.1`) match ipv4
+subnets.
+
+The `clientIp` gets canonicalized (lowercased and compressed, `2001:DB8:0:0::1` as `2001:db8::1`, ipv4 mapped ipv6
+addresses as ipv4, `::ffff:203.0.113.1` as `203.0.113.1`), so that the same client always resolves to the same string,
+no matter how a hop wrote it (rate limit keys, allowlists, logs). An ipv6 address with a zone id (`fe80::1%eth0`) is
+not a valid ip.
 
 The scheme and host get only resolved when a client ip was resolved: the entry at the same position, if the header has
 as many entries as the `x-forwarded-for` header (proxies appending to all of them), the last (the one the nearest proxy
-set) otherwise. The scheme gets lowercased.
+set) otherwise. The scheme gets lowercased and must be `http` or `https`, the host gets lowercased and must be a
+syntactically valid host (a hostname, an ipv4 or a bracketed ipv6, each with an optional port from 1 to 65535),
+everything else resolves `undefined`.
 
 ### Security
 
-The middleware only sees the headers, not the connection: it cannot verify that the last hop actually was a trusted
-proxy. The server must not be reachable except through the proxies, and the proxies must set (or strip) all the
-forwarded headers, as any header they do not touch is supplied by the client.
-
-If the server (or a middleware in front) sets the address of the connection as `remoteAddress` attribute (a string,
-`undefined` counts as not set), the middleware uses it: a connection from outside the trusted ranges counts as the
-client itself, and the headers get ignored. A `remoteAddress` which is not a valid ip (junk, a non string) resolves
-nothing, the middleware never falls back to the headers. Mind that [chubbyts-undici-server][2] itself does not set the
-attribute, without it the middleware runs in the headers only mode described above.
-
-The `clientIp` is always a valid ip in its canonical form (lowercased, compressed, without zone id, e.g.
-`::ffff:203.0.113.1` for an ipv4 mapped ipv6 address), so that it can be compared as a string. Ipv4 mapped ipv6
-addresses (`::ffff:10.0.0.1`) match ipv4 subnets (`10.0.0.0/8`) of the trusted proxies.
-
-The `scheme` and `host` get taken from the headers as sent by the proxies (the scheme only lowercased): before using
-them for url generation or redirects, check the `scheme` against `http` / `https` and the `host` against the hosts the
-application serves (an allowlist), so that a proxy passing the client's `x-forwarded-proto` / `x-forwarded-host`
-through cannot poison generated urls:
+The trust is anchored at the address of the connection, the `remoteAddress` attribute (a string, `undefined` counts
+as not set, a port gets stripped) as set by the server or a middleware in front, so nothing else may set it (run the
+middleware before the router, a route placeholder `{remoteAddress}` would let the client choose it): a connection from
+outside the trusted ranges counts as the client itself, its address is the `clientIp` and the headers get ignored. An
+address which is not a valid ip (junk, a non string) resolves nothing, the middleware never falls back to the headers.
+A request without any address of the connection resolves nothing (fail closed), as the middleware cannot verify that
+the last hop was a trusted proxy. Mind that [chubbyts-undici-server][2] itself does not set the attribute: if the
+server never provides it, disable the check explicitly with the third argument, the server must then not be reachable
+except through the proxies:
 
 ```ts
-const { scheme, host } = serverRequest.attributes;
+createForwardedResolver(['10.0.0.0/8'], DEFAULT_FORWARDED_HEADERS, false);
+```
 
-if ((scheme !== 'http' && scheme !== 'https') || !['example.com', 'www.example.com'].includes(host ?? '')) {
+Either way, the proxies must set (or strip) all the forwarded headers, as any header they do not touch is supplied by
+the client: a proxy passing the client's `x-forwarded-proto` / `x-forwarded-host` through lets the client choose them,
+the middleware cannot tell. The `clientIp` is always a valid ip and the `scheme` always `http` or `https`, but the
+`host` is only checked for its syntax: before using it for url generation or redirects, check it against the hosts the
+application serves (an allowlist), so that a passed through `x-forwarded-host` cannot poison generated urls:
+
+```ts
+const { host } = serverRequest.attributes;
+
+if (!['example.com', 'www.example.com'].includes(host ?? '')) {
   return new Response('Bad Request', { status: 400 });
 }
 ```
 
+The RFC 7239 `Forwarded` header (`for=...;proto=...;host=...`) is not supported, only the de-facto `x-forwarded-*`
+headers (or single value ones like `x-real-ip`, see below): if the proxies send `Forwarded`, configure them to send the
+`x-forwarded-*` headers as well.
+
 ### Headers
 
-The second argument replaces the header names (`for` is required, the others are optional), useful for a proxy setting
-a single value header like `x-real-ip`:
+The second argument replaces the header names (each one optional, `null` disables `proto` and `host`, `for` cannot be
+disabled, an invalid header name throws), useful for a proxy setting a single value header like `x-real-ip`:
 
 ```ts
-createForwardedResolver(['10.0.0.0/8'], { for: 'x-real-ip', proto: 'x-forwarded-proto' });
+createForwardedResolver(['10.0.0.0/8'], { for: 'x-real-ip', proto: 'x-forwarded-proto', host: null });
 ```
 
 ### Service factories (chubbyts-dic-config)
@@ -136,6 +155,7 @@ const container = createContainerByConfigFactory({
     trustedProxy: {
       trustedProxies: ['10.0.0.0/8', '::1'],
       // headers: { for: 'x-forwarded-for', proto: 'x-forwarded-proto', host: 'x-forwarded-host' },
+      // requireRemoteAddress: true,
     } satisfies TrustedProxyConfig,
   },
   dependencies: {
@@ -157,7 +177,7 @@ const container = createContainerByConfigFactory({
   chubbyts: {
     trustedProxy: {
       public: { trustedProxies: ['10.0.0.0/8', '::1'] },
-      internal: { trustedProxies: ['192.168.0.0/16'], headers: { for: 'x-real-ip', proto: 'x-forwarded-proto' } },
+      internal: { trustedProxies: ['192.168.0.0/16'], headers: { for: 'x-real-ip', host: null } },
     } satisfies Record<string, TrustedProxyConfig>,
   },
   dependencies: {
