@@ -25,16 +25,16 @@ headers (`x-forwarded-for`, `x-forwarded-proto`, `x-forwarded-host`) of trusted 
 ## Requirements
 
  * node: 22
- * [@chubbyts/chubbyts-dic-config-factory][5]: ^1.0.0
- * [@chubbyts/chubbyts-dic-types][3]: ^2.3.0
- * [@chubbyts/chubbyts-undici-server][2]: ^1.2.0
+ * [@chubbyts/chubbyts-dic-config-factory][5]: ^1.0.1
+ * [@chubbyts/chubbyts-dic-types][3]: ^2.3.1
+ * [@chubbyts/chubbyts-undici-server][2]: ^1.3.1
 
 ## Installation
 
 Through [NPM](https://www.npmjs.com) as [@chubbyts/chubbyts-undici-trusted-proxy][1].
 
 ```ts
-npm i @chubbyts/chubbyts-undici-trusted-proxy@^1.2.0
+npm i @chubbyts/chubbyts-undici-trusted-proxy@^1.2.1
 ```
 
 ## Usage
